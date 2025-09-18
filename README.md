@@ -1,6 +1,8 @@
 # Minecraft Display Entities Generator
 
-将图片转换为 Minecraft **展示实体（block_display）** 指令集合的工具，支持 **16 色 concrete**，并提供 GUI 操作界面。可自定义缩放、坐标、发光、颜色选择，并进行二维优化，减少实体数量。
+本项目是**北京交通大学Minecraft还原项目**过程中的副产物，目前程序主要功能只聚焦于对**单色**的**字体**文件的显示支持，后续功能敬请期待。
+
+将图片转换为 Minecraft **展示实体（block_display）** 指令集合的工具，支持 **16 色混凝土**，并提供 GUI 操作界面。可自定义缩放、坐标、发光、颜色选择，并进行二维优化，减少实体数量。
 
 ---
 
@@ -12,7 +14,6 @@
 - 自定义 **像素大小（scale_factor）**，调整每个像素对应 Minecraft 中的间距。
 - 可选择 **发光模式**（`brightness: block 15` 或 `0`）。
 - 支持启用/禁用 **16 色 concrete**，避免伪色问题。
-- GUI 使用 **CustomTkinter + Win11 风格 + 微软雅黑字体**，操作简单直观。
 - 输出文件为 `.mcfunction` 或 `.txt`，可直接用于命令方块或 datapack。
 
 ---
@@ -32,7 +33,7 @@ pip install pillow customtkinter
 
 ### 方法一：
 
-访问Release界面下载打包程序
+访问[Release页面](https://github.com/GoldenWaL/Minecraft_Display_Entities/releases)下载打包程序。
 
 ### 方法二：
 

@@ -74,3 +74,4 @@ my_datapack/
 ## 小技巧
 
 - 可将多张图片生成的 `.mcfunction` 文件分组到同一个 namespace 下，方便管理。
+- 或者也可以去[Release页面](https://github.com/GoldenWaL/Minecraft_Display_Entities/releases)下载一个模板，在里面改（
