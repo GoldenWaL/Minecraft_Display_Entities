@@ -54,12 +54,15 @@ my_datapack/
 ```
 .minecraft/saves/你的世界/datapacks/my_datapack/
 ```
+
 2. 进入 Minecraft 游戏并加载世界。
+
 3. 在游戏内运行以下命令以加载数据包：
 ```
 /datapack list
 ```
 确认数据包已启用。
+
 4. 执行生成指令：
 ```
 /function my_namespace:generate_image
