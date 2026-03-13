@@ -28,6 +28,7 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -130,28 +131,34 @@ public class ScaleWandMod implements ModInitializer {
         ServerWorld world = player.getServerWorld();
         BlockPos pasteOrigin = player.getBlockPos();
         float f = (float) scale;
+
+        Map<BlockPos, BlockState> nonAirBlocks = new HashMap<>();
+        for (ClipboardBlock block : snapshot.blocks()) {
+            if (!block.state().isAir()) {
+                nonAirBlocks.put(new BlockPos(block.dx(), block.dy(), block.dz()), block.state());
+            }
+        }
+
+        int nonAirCount = nonAirBlocks.size();
+        List<MergedCuboid> cuboids = mergeCuboids(nonAirBlocks);
         int spawned = 0;
 
-        for (ClipboardBlock block : snapshot.blocks()) {
-            if (block.state().isAir()) {
-                continue;
-            }
-
+        for (MergedCuboid cuboid : cuboids) {
             DisplayEntity.BlockDisplayEntity display = EntityType.BLOCK_DISPLAY.create(world);
             if (display == null) {
                 continue;
             }
 
-            double x = pasteOrigin.getX() + block.dx() * scale;
-            double y = pasteOrigin.getY() + block.dy() * scale;
-            double z = pasteOrigin.getZ() + block.dz() * scale;
+            double x = pasteOrigin.getX() + cuboid.x() * scale;
+            double y = pasteOrigin.getY() + cuboid.y() * scale;
+            double z = pasteOrigin.getZ() + cuboid.z() * scale;
 
             display.refreshPositionAndAngles(x, y, z, 0.0f, 0.0f);
-            display.setBlockState(block.state());
+            display.setBlockState(cuboid.state());
             display.setTransformation(new AffineTransformation(
                     new Vector3f(0.0f, 0.0f, 0.0f),
                     new Quaternionf(),
-                    new Vector3f(f, f, f),
+                    new Vector3f(f * cuboid.sizeX(), f * cuboid.sizeY(), f * cuboid.sizeZ()),
                     new Quaternionf()
             ));
 
@@ -160,10 +167,104 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         final int pastedTotal = spawned;
+        final int rawNonAirTotal = nonAirCount;
+        final int mergedTotal = cuboids.size();
         source.sendFeedback(() -> Text.literal(
-                "Pasted " + pastedTotal + " display entities, scale=" + scale + ", origin=" + formatPos(pasteOrigin)
+                "Pasted " + pastedTotal + " display entities from " + rawNonAirTotal
+                        + " blocks (merged to " + mergedTotal + "), scale=" + scale
+                        + ", origin=" + formatPos(pasteOrigin)
         ), false);
         return spawned;
+    }
+
+    private static List<MergedCuboid> mergeCuboids(Map<BlockPos, BlockState> blocks) {
+        Map<BlockPos, BlockState> remaining = new HashMap<>(blocks);
+        List<MergedCuboid> result = new ArrayList<>();
+
+        while (!remaining.isEmpty()) {
+            Map.Entry<BlockPos, BlockState> seed = remaining.entrySet().iterator().next();
+            BlockPos origin = seed.getKey();
+            BlockState state = seed.getValue();
+
+            int x0 = origin.getX();
+            int y0 = origin.getY();
+            int z0 = origin.getZ();
+
+            int x1 = x0;
+            while (sameState(remaining, x1 + 1, y0, z0, state)) {
+                x1++;
+            }
+
+            int z1 = z0;
+            while (canExpandZ(remaining, state, x0, x1, y0, z1 + 1)) {
+                z1++;
+            }
+
+            int y1 = y0;
+            while (canExpandY(remaining, state, x0, x1, y1 + 1, z0, z1)) {
+                y1++;
+            }
+
+            for (int y = y0; y <= y1; y++) {
+                for (int z = z0; z <= z1; z++) {
+                    for (int x = x0; x <= x1; x++) {
+                        remaining.remove(new BlockPos(x, y, z));
+                    }
+                }
+            }
+
+            result.add(new MergedCuboid(
+                    x0,
+                    y0,
+                    z0,
+                    x1 - x0 + 1,
+                    y1 - y0 + 1,
+                    z1 - z0 + 1,
+                    state
+            ));
+        }
+
+        return result;
+    }
+
+    private static boolean canExpandZ(Map<BlockPos, BlockState> blocks,
+                                      BlockState state,
+                                      int x0,
+                                      int x1,
+                                      int y,
+                                      int z) {
+        for (int x = x0; x <= x1; x++) {
+            if (!sameState(blocks, x, y, z, state)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean canExpandY(Map<BlockPos, BlockState> blocks,
+                                      BlockState state,
+                                      int x0,
+                                      int x1,
+                                      int y,
+                                      int z0,
+                                      int z1) {
+        for (int z = z0; z <= z1; z++) {
+            for (int x = x0; x <= x1; x++) {
+                if (!sameState(blocks, x, y, z, state)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameState(Map<BlockPos, BlockState> blocks,
+                                     int x,
+                                     int y,
+                                     int z,
+                                     BlockState expected) {
+        BlockState state = blocks.get(new BlockPos(x, y, z));
+        return state != null && state.equals(expected);
     }
 
     private static String formatPos(BlockPos pos) {
@@ -207,5 +308,8 @@ public class ScaleWandMod implements ModInitializer {
     }
 
     private record ClipboardBlock(int dx, int dy, int dz, BlockState state) {
+    }
+
+    private record MergedCuboid(int x, int y, int z, int sizeX, int sizeY, int sizeZ, BlockState state) {
     }
 }
