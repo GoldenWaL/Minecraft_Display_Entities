@@ -10,10 +10,12 @@ import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.command.CommandRegistryAccess;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
@@ -37,10 +39,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ScaleWandMod implements ModInitializer {
     private static final Map<UUID, Selection> SELECTIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, ClipboardSnapshot> CLIPBOARDS = new ConcurrentHashMap<>();
+    private static final Map<UUID, List<SpawnedDisplayRef>> LAST_PASTES = new ConcurrentHashMap<>();
+
     private static final SimpleCommandExceptionType NO_SELECTION =
             new SimpleCommandExceptionType(Text.literal("Select two points with a wooden hoe first."));
     private static final SimpleCommandExceptionType NO_CLIPBOARD =
             new SimpleCommandExceptionType(Text.literal("Clipboard is empty, run /copy first."));
+    private static final SimpleCommandExceptionType NO_LAST_PASTE =
+            new SimpleCommandExceptionType(Text.literal("No recent paste to undo."));
 
     @Override
     public void onInitialize() {
@@ -91,6 +97,10 @@ public class ScaleWandMod implements ModInitializer {
                 .executes(ctx -> runPaste(ctx.getSource(), 1.0))
                 .then(CommandManager.argument("scale", DoubleArgumentType.doubleArg(0.1, 16.0))
                         .executes(ctx -> runPaste(ctx.getSource(), DoubleArgumentType.getDouble(ctx, "scale")))));
+
+        dispatcher.register(CommandManager.literal("ctrlz")
+                .requires(source -> source.hasPermissionLevel(2))
+                .executes(ctx -> runCtrlz(ctx.getSource())));
     }
 
     private int runCopy(ServerCommandSource source) throws CommandSyntaxException {
@@ -141,6 +151,7 @@ public class ScaleWandMod implements ModInitializer {
 
         int nonAirCount = nonAirBlocks.size();
         List<MergedCuboid> cuboids = mergeCuboids(nonAirBlocks);
+        List<SpawnedDisplayRef> spawnedRefs = new ArrayList<>();
         int spawned = 0;
 
         for (MergedCuboid cuboid : cuboids) {
@@ -163,8 +174,11 @@ public class ScaleWandMod implements ModInitializer {
             ));
 
             world.spawnEntity(display);
+            spawnedRefs.add(new SpawnedDisplayRef(world.getRegistryKey(), display.getUuid()));
             spawned++;
         }
+
+        LAST_PASTES.put(player.getUuid(), spawnedRefs);
 
         final int pastedTotal = spawned;
         final int rawNonAirTotal = nonAirCount;
@@ -177,57 +191,108 @@ public class ScaleWandMod implements ModInitializer {
         return spawned;
     }
 
+    private int runCtrlz(ServerCommandSource source) throws CommandSyntaxException {
+        ServerPlayerEntity player = source.getPlayerOrThrow();
+        List<SpawnedDisplayRef> refs = LAST_PASTES.remove(player.getUuid());
+        if (refs == null || refs.isEmpty()) {
+            throw NO_LAST_PASTE.create();
+        }
+
+        int removed = 0;
+        for (SpawnedDisplayRef ref : refs) {
+            ServerWorld targetWorld = source.getServer().getWorld(ref.worldKey());
+            if (targetWorld == null) {
+                continue;
+            }
+
+            Entity entity = targetWorld.getEntity(ref.entityUuid());
+            if (entity != null) {
+                entity.discard();
+                removed++;
+            }
+        }
+
+        final int removedTotal = removed;
+        source.sendFeedback(() -> Text.literal("Undo complete. Removed " + removedTotal + " display entities."), false);
+        return removed;
+    }
+
     private static List<MergedCuboid> mergeCuboids(Map<BlockPos, BlockState> blocks) {
-        Map<BlockPos, BlockState> remaining = new HashMap<>(blocks);
+        if (blocks.isEmpty()) {
+            return List.of();
+        }
+
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+
+        Map<Long, BlockState> remaining = new HashMap<>(blocks.size() * 2);
+        for (Map.Entry<BlockPos, BlockState> entry : blocks.entrySet()) {
+            BlockPos pos = entry.getKey();
+            remaining.put(pos.asLong(), entry.getValue());
+
+            minX = Math.min(minX, pos.getX());
+            minY = Math.min(minY, pos.getY());
+            minZ = Math.min(minZ, pos.getZ());
+            maxX = Math.max(maxX, pos.getX());
+            maxY = Math.max(maxY, pos.getY());
+            maxZ = Math.max(maxZ, pos.getZ());
+        }
+
         List<MergedCuboid> result = new ArrayList<>();
 
-        while (!remaining.isEmpty()) {
-            Map.Entry<BlockPos, BlockState> seed = remaining.entrySet().iterator().next();
-            BlockPos origin = seed.getKey();
-            BlockState state = seed.getValue();
-
-            int x0 = origin.getX();
-            int y0 = origin.getY();
-            int z0 = origin.getZ();
-
-            int x1 = x0;
-            while (sameState(remaining, x1 + 1, y0, z0, state)) {
-                x1++;
-            }
-
-            int z1 = z0;
-            while (canExpandZ(remaining, state, x0, x1, y0, z1 + 1)) {
-                z1++;
-            }
-
-            int y1 = y0;
-            while (canExpandY(remaining, state, x0, x1, y1 + 1, z0, z1)) {
-                y1++;
-            }
-
-            for (int y = y0; y <= y1; y++) {
-                for (int z = z0; z <= z1; z++) {
-                    for (int x = x0; x <= x1; x++) {
-                        remaining.remove(new BlockPos(x, y, z));
+        for (int y = minY; y <= maxY; y++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int x = minX; x <= maxX; x++) {
+                    long seedKey = BlockPos.asLong(x, y, z);
+                    BlockState state = remaining.get(seedKey);
+                    if (state == null) {
+                        continue;
                     }
+
+                    int x1 = x;
+                    while (sameState(remaining, x1 + 1, y, z, state)) {
+                        x1++;
+                    }
+
+                    int z1 = z;
+                    while (canExpandZ(remaining, state, x, x1, y, z1 + 1)) {
+                        z1++;
+                    }
+
+                    int y1 = y;
+                    while (canExpandY(remaining, state, x, x1, y1 + 1, z, z1)) {
+                        y1++;
+                    }
+
+                    for (int yy = y; yy <= y1; yy++) {
+                        for (int zz = z; zz <= z1; zz++) {
+                            for (int xx = x; xx <= x1; xx++) {
+                                remaining.remove(BlockPos.asLong(xx, yy, zz));
+                            }
+                        }
+                    }
+
+                    result.add(new MergedCuboid(
+                            x,
+                            y,
+                            z,
+                            x1 - x + 1,
+                            y1 - y + 1,
+                            z1 - z + 1,
+                            state
+                    ));
                 }
             }
-
-            result.add(new MergedCuboid(
-                    x0,
-                    y0,
-                    z0,
-                    x1 - x0 + 1,
-                    y1 - y0 + 1,
-                    z1 - z0 + 1,
-                    state
-            ));
         }
 
         return result;
     }
 
-    private static boolean canExpandZ(Map<BlockPos, BlockState> blocks,
+    private static boolean canExpandZ(Map<Long, BlockState> blocks,
                                       BlockState state,
                                       int x0,
                                       int x1,
@@ -241,7 +306,7 @@ public class ScaleWandMod implements ModInitializer {
         return true;
     }
 
-    private static boolean canExpandY(Map<BlockPos, BlockState> blocks,
+    private static boolean canExpandY(Map<Long, BlockState> blocks,
                                       BlockState state,
                                       int x0,
                                       int x1,
@@ -258,12 +323,12 @@ public class ScaleWandMod implements ModInitializer {
         return true;
     }
 
-    private static boolean sameState(Map<BlockPos, BlockState> blocks,
+    private static boolean sameState(Map<Long, BlockState> blocks,
                                      int x,
                                      int y,
                                      int z,
                                      BlockState expected) {
-        BlockState state = blocks.get(new BlockPos(x, y, z));
+        BlockState state = blocks.get(BlockPos.asLong(x, y, z));
         return state != null && state.equals(expected);
     }
 
@@ -311,5 +376,8 @@ public class ScaleWandMod implements ModInitializer {
     }
 
     private record MergedCuboid(int x, int y, int z, int sizeX, int sizeY, int sizeZ, BlockState state) {
+    }
+
+    private record SpawnedDisplayRef(RegistryKey<World> worldKey, UUID entityUuid) {
     }
 }
