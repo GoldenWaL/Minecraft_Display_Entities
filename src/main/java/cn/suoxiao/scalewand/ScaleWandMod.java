@@ -1,4 +1,4 @@
-﻿package cn.suoxiao.scalewand;
+package cn.suoxiao.scalewand;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
