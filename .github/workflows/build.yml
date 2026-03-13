@@ -31,8 +31,11 @@ jobs:
         with:
           gradle-version: 8.10.2
 
+      - name: Verify Gradle
+        run: gradle --version
+
       - name: Build
-        run: gradle --no-daemon clean build
+        run: gradle --no-daemon clean build --stacktrace --info
 
       - name: Upload JAR
         uses: actions/upload-artifact@v4
