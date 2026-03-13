@@ -37,9 +37,9 @@ public class ScaleWandMod implements ModInitializer {
     private static final Map<UUID, Selection> SELECTIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, ClipboardSnapshot> CLIPBOARDS = new ConcurrentHashMap<>();
     private static final SimpleCommandExceptionType NO_SELECTION =
-            new SimpleCommandExceptionType(Text.literal("璇峰厛鐢ㄦ湪閿勯€夋嫨涓や釜鐐广€?));
+            new SimpleCommandExceptionType(Text.literal("Select two points with a wooden hoe first."));
     private static final SimpleCommandExceptionType NO_CLIPBOARD =
-            new SimpleCommandExceptionType(Text.literal("褰撳墠娌℃湁澶嶅埗鍐呭锛岃鍏堟墽琛?/copy銆?));
+            new SimpleCommandExceptionType(Text.literal("Clipboard is empty, run /copy first."));
 
     @Override
     public void onInitialize() {
@@ -54,7 +54,7 @@ public class ScaleWandMod implements ModInitializer {
             }
             Selection selection = SELECTIONS.computeIfAbsent(player.getUuid(), ignored -> new Selection());
             selection.setPos1(pos.toImmutable());
-            player.sendMessage(Text.literal("[閫夊尯] 绗竴閫夋嫨鐐? " + formatPos(pos)), true);
+            player.sendMessage(Text.literal("[Selection] Pos1: " + formatPos(pos)), true);
             return ActionResult.SUCCESS;
         });
 
@@ -65,7 +65,7 @@ public class ScaleWandMod implements ModInitializer {
             BlockPos pos = hitResult.getBlockPos();
             Selection selection = SELECTIONS.computeIfAbsent(player.getUuid(), ignored -> new Selection());
             selection.setPos2(pos.toImmutable());
-            player.sendMessage(Text.literal("[閫夊尯] 绗簩閫夋嫨鐐? " + formatPos(pos)), true);
+            player.sendMessage(Text.literal("[Selection] Pos2: " + formatPos(pos)), true);
             return ActionResult.SUCCESS;
         });
     }
@@ -114,8 +114,8 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         CLIPBOARDS.put(player.getUuid(), new ClipboardSnapshot(blocks));
-        source.sendFeedback(() -> Text.literal("澶嶅埗瀹屾垚: 鎵弿骞朵繚瀛?" + total + " 涓柟鍧楃姸鎬侊紙鍚┖姘旓級銆?), false);
-        source.sendFeedback(() -> Text.literal("澶嶅埗鍘熺偣(鐩稿): " + formatPos(copyOrigin)), false);
+        source.sendFeedback(() -> Text.literal("Copied " + total + " block states (including air)."), false);
+        source.sendFeedback(() -> Text.literal("Copy origin: " + formatPos(copyOrigin)), false);
         return blocks.size();
     }
 
@@ -159,7 +159,7 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         source.sendFeedback(() -> Text.literal(
-                "绮樿创瀹屾垚: 宸茬敓鎴?" + spawned + " 涓睍绀哄疄浣? 缂╂斁鍊嶆暟=" + scale + ", 绮樿创鍘熺偣=" + formatPos(pasteOrigin)
+                "Pasted " + spawned + " display entities, scale=" + scale + ", origin=" + formatPos(pasteOrigin)
         ), false);
         return spawned;
     }
