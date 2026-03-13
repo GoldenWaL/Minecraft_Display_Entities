@@ -11,7 +11,6 @@ import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.command.CommandRegistryAccess;
 import net.minecraft.entity.EntityType;
-import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -38,9 +37,9 @@ public class ScaleWandMod implements ModInitializer {
     private static final Map<UUID, Selection> SELECTIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, ClipboardSnapshot> CLIPBOARDS = new ConcurrentHashMap<>();
     private static final SimpleCommandExceptionType NO_SELECTION =
-            new SimpleCommandExceptionType(Text.literal("请先用木锄选择两个点。"));
+            new SimpleCommandExceptionType(Text.literal("璇峰厛鐢ㄦ湪閿勯€夋嫨涓や釜鐐广€?));
     private static final SimpleCommandExceptionType NO_CLIPBOARD =
-            new SimpleCommandExceptionType(Text.literal("当前没有复制内容，请先执行 /copy。"));
+            new SimpleCommandExceptionType(Text.literal("褰撳墠娌℃湁澶嶅埗鍐呭锛岃鍏堟墽琛?/copy銆?));
 
     @Override
     public void onInitialize() {
@@ -55,7 +54,7 @@ public class ScaleWandMod implements ModInitializer {
             }
             Selection selection = SELECTIONS.computeIfAbsent(player.getUuid(), ignored -> new Selection());
             selection.setPos1(pos.toImmutable());
-            player.sendMessage(Text.literal("[选区] 第一选择点: " + formatPos(pos)), true);
+            player.sendMessage(Text.literal("[閫夊尯] 绗竴閫夋嫨鐐? " + formatPos(pos)), true);
             return ActionResult.SUCCESS;
         });
 
@@ -66,7 +65,7 @@ public class ScaleWandMod implements ModInitializer {
             BlockPos pos = hitResult.getBlockPos();
             Selection selection = SELECTIONS.computeIfAbsent(player.getUuid(), ignored -> new Selection());
             selection.setPos2(pos.toImmutable());
-            player.sendMessage(Text.literal("[选区] 第二选择点: " + formatPos(pos)), true);
+            player.sendMessage(Text.literal("[閫夊尯] 绗簩閫夋嫨鐐? " + formatPos(pos)), true);
             return ActionResult.SUCCESS;
         });
     }
@@ -115,8 +114,8 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         CLIPBOARDS.put(player.getUuid(), new ClipboardSnapshot(blocks));
-        source.sendFeedback(() -> Text.literal("复制完成: 扫描并保存 " + total + " 个方块状态（含空气）。"), false);
-        source.sendFeedback(() -> Text.literal("复制原点(相对): " + formatPos(copyOrigin)), false);
+        source.sendFeedback(() -> Text.literal("澶嶅埗瀹屾垚: 鎵弿骞朵繚瀛?" + total + " 涓柟鍧楃姸鎬侊紙鍚┖姘旓級銆?), false);
+        source.sendFeedback(() -> Text.literal("澶嶅埗鍘熺偣(鐩稿): " + formatPos(copyOrigin)), false);
         return blocks.size();
     }
 
@@ -137,7 +136,7 @@ public class ScaleWandMod implements ModInitializer {
                 continue;
             }
 
-            DisplayEntity.BlockDisplayEntity display = EntityType.BLOCK_DISPLAY.create(world, SpawnReason.COMMAND);
+            DisplayEntity.BlockDisplayEntity display = EntityType.BLOCK_DISPLAY.create(world);
             if (display == null) {
                 continue;
             }
@@ -160,7 +159,7 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         source.sendFeedback(() -> Text.literal(
-                "粘贴完成: 已生成 " + spawned + " 个展示实体, 缩放倍数=" + scale + ", 粘贴原点=" + formatPos(pasteOrigin)
+                "绮樿创瀹屾垚: 宸茬敓鎴?" + spawned + " 涓睍绀哄疄浣? 缂╂斁鍊嶆暟=" + scale + ", 绮樿创鍘熺偣=" + formatPos(pasteOrigin)
         ), false);
         return spawned;
     }
