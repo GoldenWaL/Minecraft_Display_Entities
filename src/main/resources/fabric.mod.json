@@ -1,0 +1,24 @@
+﻿{
+  "schemaVersion": 1,
+  "id": "suoxiao",
+  "version": "${version}",
+  "name": "SuoXiao",
+  "description": "Wooden-hoe region copy/paste scaling mod using display entities.",
+  "authors": [
+    "Codex"
+  ],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "cn.suoxiao.scalewand.ScaleWandMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.9",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
+
