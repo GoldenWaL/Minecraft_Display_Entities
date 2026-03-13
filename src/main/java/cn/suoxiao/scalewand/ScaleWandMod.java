@@ -114,7 +114,8 @@ public class ScaleWandMod implements ModInitializer {
         }
 
         CLIPBOARDS.put(player.getUuid(), new ClipboardSnapshot(blocks));
-        source.sendFeedback(() -> Text.literal("Copied " + total + " block states (including air)."), false);
+        final int copiedTotal = total;
+        source.sendFeedback(() -> Text.literal("Copied " + copiedTotal + " block states (including air)."), false);
         source.sendFeedback(() -> Text.literal("Copy origin: " + formatPos(copyOrigin)), false);
         return blocks.size();
     }
@@ -158,8 +159,9 @@ public class ScaleWandMod implements ModInitializer {
             spawned++;
         }
 
+        final int pastedTotal = spawned;
         source.sendFeedback(() -> Text.literal(
-                "Pasted " + spawned + " display entities, scale=" + scale + ", origin=" + formatPos(pasteOrigin)
+                "Pasted " + pastedTotal + " display entities, scale=" + scale + ", origin=" + formatPos(pasteOrigin)
         ), false);
         return spawned;
     }
