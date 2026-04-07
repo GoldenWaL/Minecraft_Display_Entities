@@ -84,13 +84,12 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
         return []
 
     rectangles = []
-    used = [[False] * w for _ in range(h)]
 
     def collect_pixels(x1, y1, x2, y2):
         pts = []
         for yy in range(y1, y2):
             for xx in range(x1, x2):
-                if not used[yy][xx] and color_grid[yy][xx] is not None:
+                if color_grid[yy][xx] is not None:
                     pts.append((xx, yy))
         return pts
 
@@ -129,6 +128,7 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
         return None
 
     pq = []
+    loss_threshold = max(0.0, float(acceptable_loss))
     root = (0, 0, w, h)
     c, err, n = rect_best_color_and_error(*root)
     if c is None:
@@ -137,7 +137,7 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
 
     while pq:
         neg_err, rect, color, err, n = heapq.heappop(pq)
-        if err <= acceptable_loss:
+        if err <= loss_threshold:
             rectangles.append((rect, color))
             continue
 
@@ -158,20 +158,9 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
             heapq.heappush(pq, (-e1, r1, c1, e1, n1))
             continue
 
-        parent_obj = 1.0 + (err / max(1.0, acceptable_loss + 1e-9))
-        child_obj = 2.0 + (e1 / max(1.0, acceptable_loss + 1e-9)) + (e2 / max(1.0, acceptable_loss + 1e-9))
-        if child_obj < parent_obj:
-            heapq.heappush(pq, (-e1, r1, c1, e1, n1))
-            heapq.heappush(pq, (-e2, r2, c2, e2, n2))
-        else:
-            rectangles.append((rect, color))
-
-    for rect, color in rectangles:
-        x1, y1, x2, y2 = rect
-        for yy in range(y1, y2):
-            for xx in range(x1, x2):
-                if color_grid[yy][xx] is not None:
-                    used[yy][xx] = True
+        # 只要超过误差阈值，就继续分割，确保调低阈值时实体数量会增加而不是卡在单实体
+        heapq.heappush(pq, (-e1, r1, c1, e1, n1))
+        heapq.heappush(pq, (-e2, r2, c2, e2, n2))
 
     merged = []
     for rect, color in rectangles:
