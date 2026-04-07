@@ -1,4 +1,5 @@
 import os
+import heapq
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -41,15 +42,29 @@ def nearest_color_name(rgb, enabled_colors):
             bestname = name
     return bestname
 
+def nearest_color_name_with_error(rgb, enabled_colors):
+    best = None
+    bestname = None
+    for name, col in MC_COLORS.items():
+        if not enabled_colors[name]:
+            continue
+        d = rgb_dist(rgb, col)
+        if best is None or d < best:
+            best = d
+            bestname = name
+    return bestname, best if best is not None else 0
+
 def build_color_grid(img, skip_transparent, enabled_colors):
     w, h = img.size
     pixels = img.load()
     grid = [[None]*w for _ in range(h)]
+    rgb_grid = [[None]*w for _ in range(h)]
     for j in range(h):
         for i in range(w):
             r,g,b,a = pixels[i,j]
             if skip_transparent and a == 0:
                 grid[j][i] = None
+                rgb_grid[j][i] = None
             else:
                 if a < 255:
                     alpha = a / 255.0
@@ -57,8 +72,113 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                     r = int(round(r * alpha + bg[0] * (1-alpha)))
                     g = int(round(g * alpha + bg[1] * (1-alpha)))
                     b = int(round(b * alpha + bg[2] * (1-alpha)))
-                grid[j][i] = nearest_color_name((r,g,b), enabled_colors)
-    return grid
+                rgb = (r, g, b)
+                rgb_grid[j][i] = rgb
+                grid[j][i] = nearest_color_name(rgb, enabled_colors)
+    return grid, rgb_grid
+
+def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
+    h = len(color_grid)
+    w = len(color_grid[0]) if h else 0
+    if w == 0 or h == 0:
+        return []
+
+    rectangles = []
+    used = [[False] * w for _ in range(h)]
+
+    def collect_pixels(x1, y1, x2, y2):
+        pts = []
+        for yy in range(y1, y2):
+            for xx in range(x1, x2):
+                if not used[yy][xx] and color_grid[yy][xx] is not None:
+                    pts.append((xx, yy))
+        return pts
+
+    def rect_best_color_and_error(x1, y1, x2, y2):
+        pts = collect_pixels(x1, y1, x2, y2)
+        if not pts:
+            return None, 0.0, 0
+        total = [0, 0, 0]
+        for xx, yy in pts:
+            r, g, b = rgb_grid[yy][xx]
+            total[0] += r
+            total[1] += g
+            total[2] += b
+        n = len(pts)
+        mean_rgb = (total[0] / n, total[1] / n, total[2] / n)
+        best_color, _ = nearest_color_name_with_error(mean_rgb, enabled_colors)
+        error_sum = 0.0
+        target = MC_COLORS[best_color]
+        for xx, yy in pts:
+            error_sum += rgb_dist(rgb_grid[yy][xx], target)
+        avg_error = error_sum / n
+        return best_color, avg_error, n
+
+    def split_rect(rect):
+        x1, y1, x2, y2 = rect
+        ww = x2 - x1
+        hh = y2 - y1
+        if ww <= 1 and hh <= 1:
+            return None
+        if ww >= hh and ww > 1:
+            mid = x1 + ww // 2
+            return (x1, y1, mid, y2), (mid, y1, x2, y2)
+        if hh > 1:
+            mid = y1 + hh // 2
+            return (x1, y1, x2, mid), (x1, mid, x2, y2)
+        return None
+
+    pq = []
+    root = (0, 0, w, h)
+    c, err, n = rect_best_color_and_error(*root)
+    if c is None:
+        return []
+    heapq.heappush(pq, (-err, root, c, err, n))
+
+    while pq:
+        neg_err, rect, color, err, n = heapq.heappop(pq)
+        if err <= acceptable_loss:
+            rectangles.append((rect, color))
+            continue
+
+        split = split_rect(rect)
+        if split is None:
+            rectangles.append((rect, color))
+            continue
+
+        r1, r2 = split
+        c1, e1, n1 = rect_best_color_and_error(*r1)
+        c2, e2, n2 = rect_best_color_and_error(*r2)
+        if c1 is None and c2 is None:
+            continue
+        if c1 is None:
+            heapq.heappush(pq, (-e2, r2, c2, e2, n2))
+            continue
+        if c2 is None:
+            heapq.heappush(pq, (-e1, r1, c1, e1, n1))
+            continue
+
+        parent_obj = 1.0 + (err / max(1.0, acceptable_loss + 1e-9))
+        child_obj = 2.0 + (e1 / max(1.0, acceptable_loss + 1e-9)) + (e2 / max(1.0, acceptable_loss + 1e-9))
+        if child_obj < parent_obj:
+            heapq.heappush(pq, (-e1, r1, c1, e1, n1))
+            heapq.heappush(pq, (-e2, r2, c2, e2, n2))
+        else:
+            rectangles.append((rect, color))
+
+    for rect, color in rectangles:
+        x1, y1, x2, y2 = rect
+        for yy in range(y1, y2):
+            for xx in range(x1, x2):
+                if color_grid[yy][xx] is not None:
+                    used[yy][xx] = True
+
+    merged = []
+    for rect, color in rectangles:
+        x1, y1, x2, y2 = rect
+        if x2 > x1 and y2 > y1:
+            merged.append((x1, y1, x2 - x1, y2 - y1, color))
+    return merged
 
 def ensure_dir(path):
     d = os.path.dirname(path)
@@ -67,50 +187,23 @@ def ensure_dir(path):
 
 def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
                          pixel_size, invert_y, skip_transparent,
-                         glow, enabled_colors, orientation="横向"):
+                         glow, enabled_colors, orientation="横向",
+                         acceptable_loss=0.0):
 
     img = Image.open(img_path).convert("RGBA")
-    if orientation == "竖向" or "竖向（z延申）":
+    if orientation in ("竖向", "竖向（z延申）"):
         img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
 
     w, h = img.size
-    color_grid = build_color_grid(img, skip_transparent, enabled_colors)
-    processed = [[False]*w for _ in range(h)]
+    color_grid, rgb_grid = build_color_grid(img, skip_transparent, enabled_colors)
     commands = []
 
     brightness_str = "brightness:{block:15,sky:0}" if glow else "brightness:{block:0,sky:0}"
 
-    for j in range(h):
-        i = 0
-        while i < w:
-            if processed[j][i] or color_grid[j][i] is None:
-                i += 1
-                continue
-            color_name = color_grid[j][i]
+    optimized_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
+
+    for i, j, rect_w, rect_h, color_name in optimized_rects:
             block = MC_BLOCK_TEMPLATE.format(color_name)
-            # 横向扩展
-            max_w_run = 1
-            while i + max_w_run < w and (not processed[j][i+max_w_run]) and color_grid[j][i+max_w_run] == color_name:
-                max_w_run += 1
-            # 向下扩展
-            height = 1
-            cur_width = max_w_run
-            while True:
-                next_row = j + height
-                if next_row >= h:
-                    break
-                run2 = 0
-                while run2 < cur_width and (i + run2) < w and (not processed[next_row][i+run2]) and color_grid[next_row][i+run2] == color_name:
-                    run2 += 1
-                if run2 == 0:
-                    break
-                cur_width = run2
-                height += 1
-            rect_w = cur_width
-            rect_h = height
-            for jj in range(j, j+rect_h):
-                for ii in range(i, i+rect_w):
-                    processed[jj][ii] = True
             # 坐标计算
             if orientation == "横向":
                 world_x = base_x + i * pixel_size
@@ -148,7 +241,6 @@ def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
                         f'scale:[{scale_x:.6f}f,{scale_y:.6f}f,{scale_z:.6f}f],translation:[0f,0f,0f]}}}}')
             cmd = pos_part + nbt_part
             commands.append(cmd)
-            i += rect_w
     ensure_dir(out_path)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("# Generated by Minecraft Display Entities Generator\n")
@@ -175,6 +267,7 @@ class App(ctk.CTk):
         self.invert_y = ctk.BooleanVar(value=False)
         self.glow = ctk.BooleanVar(value=False)
         self.orientation = ctk.StringVar(value="横向")
+        self.acceptable_loss = ctk.DoubleVar(value=0.0)
         self.enabled_colors = {name: ctk.BooleanVar(value=True) for name in MC_COLORS}
 
         # ---------- 左右分栏 ----------
@@ -203,6 +296,8 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(left_frame, text="发光", variable=self.glow, font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=2)
         ctk.CTkLabel(left_frame, text="显示方向:", font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=(10,0))
         ctk.CTkOptionMenu(left_frame, variable=self.orientation, values=["横向", "竖向", "竖向（z延申）"], font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=2)
+        ctk.CTkLabel(left_frame, text="可接受损失(0~20000):", font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=(6,0))
+        ctk.CTkEntry(left_frame, textvariable=self.acceptable_loss, width=280, font=("Microsoft YaHei", 11)).pack(padx=5, pady=2)
         ctk.CTkButton(left_frame, text="生成指令", command=self.run, font=("Microsoft YaHei", 12, "bold")).pack(pady=10)
 
         # ---------- 颜色选择 ----------
@@ -269,7 +364,8 @@ class App(ctk.CTk):
                 skip_transparent=True,
                 glow=self.glow.get(),
                 enabled_colors=enabled_colors_dict,
-                orientation=self.orientation.get()
+                orientation=self.orientation.get(),
+                acceptable_loss=max(0.0, self.acceptable_loss.get())
             )
             messagebox.showinfo("完成", f"生成 {n} 条指令，图片尺寸 {w}×{h}")
         except Exception as e:
