@@ -95,8 +95,9 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
 
     def rect_best_color_and_error(x1, y1, x2, y2):
         pts = collect_pixels(x1, y1, x2, y2)
+        area = max(0, (x2 - x1) * (y2 - y1))
         if not pts:
-            return None, 0.0, 0
+            return None, 0.0, 0, area
         total = [0, 0, 0]
         for xx, yy in pts:
             r, g, b = rgb_grid[yy][xx]
@@ -111,7 +112,7 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
         for xx, yy in pts:
             error_sum += rgb_dist(rgb_grid[yy][xx], target)
         avg_error = error_sum / n
-        return best_color, avg_error, n
+        return best_color, avg_error, n, area
 
     def split_rect(rect):
         x1, y1, x2, y2 = rect
@@ -130,14 +131,15 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
     pq = []
     loss_threshold = max(0.0, float(acceptable_loss))
     root = (0, 0, w, h)
-    c, err, n = rect_best_color_and_error(*root)
+    c, err, n, area = rect_best_color_and_error(*root)
     if c is None:
         return []
-    heapq.heappush(pq, (-err, root, c, err, n))
+    heapq.heappush(pq, (-err, root, c, err, n, area))
 
     while pq:
-        neg_err, rect, color, err, n = heapq.heappop(pq)
-        if err <= loss_threshold:
+        neg_err, rect, color, err, n, area = heapq.heappop(pq)
+        is_solid_rect = (n == area)
+        if is_solid_rect and err <= loss_threshold:
             rectangles.append((rect, color))
             continue
 
@@ -147,20 +149,20 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
             continue
 
         r1, r2 = split
-        c1, e1, n1 = rect_best_color_and_error(*r1)
-        c2, e2, n2 = rect_best_color_and_error(*r2)
+        c1, e1, n1, a1 = rect_best_color_and_error(*r1)
+        c2, e2, n2, a2 = rect_best_color_and_error(*r2)
         if c1 is None and c2 is None:
             continue
         if c1 is None:
-            heapq.heappush(pq, (-e2, r2, c2, e2, n2))
+            heapq.heappush(pq, (-e2, r2, c2, e2, n2, a2))
             continue
         if c2 is None:
-            heapq.heappush(pq, (-e1, r1, c1, e1, n1))
+            heapq.heappush(pq, (-e1, r1, c1, e1, n1, a1))
             continue
 
-        # 只要超过误差阈值，就继续分割，确保调低阈值时实体数量会增加而不是卡在单实体
-        heapq.heappush(pq, (-e1, r1, c1, e1, n1))
-        heapq.heappush(pq, (-e2, r2, c2, e2, n2))
+        # 只要超过误差阈值，或矩形中包含透明空洞，就继续分割
+        heapq.heappush(pq, (-e1, r1, c1, e1, n1, a1))
+        heapq.heappush(pq, (-e2, r2, c2, e2, n2, a2))
 
     merged = []
     for rect, color in rectangles:
