@@ -1,7 +1,9 @@
 import os
 import time
 import threading
+import multiprocessing
 from functools import lru_cache
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -27,6 +29,10 @@ MC_COLORS = {
     "black":       (25,25,25),
 }
 MC_BLOCK_TEMPLATE = "minecraft:{}_concrete"
+
+_WORKER_RGB_GRID = None
+_WORKER_ENABLED = None
+_WORKER_LOSS = 0.0
 
 # ---------- 工具函数 ----------
 def rgb_dist(a, b):
@@ -79,7 +85,134 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                 grid[j][i] = nearest_color_name(rgb, enabled_colors)
     return grid, rgb_grid
 
-def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
+def _build_prefix(rgb_grid):
+    h = len(rgb_grid)
+    w = len(rgb_grid[0]) if h else 0
+    occ = [[0] * (w + 1) for _ in range(h + 1)]
+    sr = [[0] * (w + 1) for _ in range(h + 1)]
+    sg = [[0] * (w + 1) for _ in range(h + 1)]
+    sb = [[0] * (w + 1) for _ in range(h + 1)]
+    sr2 = [[0] * (w + 1) for _ in range(h + 1)]
+    sg2 = [[0] * (w + 1) for _ in range(h + 1)]
+    sb2 = [[0] * (w + 1) for _ in range(h + 1)]
+    for y in range(h):
+        for x in range(w):
+            pix = rgb_grid[y][x]
+            o = 0 if pix is None else 1
+            r = 0 if pix is None else pix[0]
+            g = 0 if pix is None else pix[1]
+            b = 0 if pix is None else pix[2]
+            occ[y + 1][x + 1] = occ[y][x + 1] + occ[y + 1][x] - occ[y][x] + o
+            sr[y + 1][x + 1] = sr[y][x + 1] + sr[y + 1][x] - sr[y][x] + r
+            sg[y + 1][x + 1] = sg[y][x + 1] + sg[y + 1][x] - sg[y][x] + g
+            sb[y + 1][x + 1] = sb[y][x + 1] + sb[y + 1][x] - sb[y][x] + b
+            sr2[y + 1][x + 1] = sr2[y][x + 1] + sr2[y + 1][x] - sr2[y][x] + r * r
+            sg2[y + 1][x + 1] = sg2[y][x + 1] + sg2[y + 1][x] - sg2[y][x] + g * g
+            sb2[y + 1][x + 1] = sb2[y][x + 1] + sb2[y + 1][x] - sb2[y][x] + b * b
+    return occ, sr, sg, sb, sr2, sg2, sb2
+
+def _worker_init(rgb_grid, enabled, loss_threshold):
+    global _WORKER_RGB_GRID, _WORKER_ENABLED, _WORKER_LOSS
+    _WORKER_RGB_GRID = rgb_grid
+    _WORKER_ENABLED = enabled
+    _WORKER_LOSS = loss_threshold
+
+def _solve_rect_exact(rgb_grid, enabled, loss_threshold, rect):
+    x1, y1, x2, y2 = rect
+    occ, sr, sg, sb, sr2, sg2, sb2 = _build_prefix(rgb_grid)
+
+    def rect_sum(prefix, ax1, ay1, ax2, ay2):
+        return prefix[ay2][ax2] - prefix[ay1][ax2] - prefix[ay2][ax1] + prefix[ay1][ax1]
+
+    def one_rect_plan(ax1, ay1, ax2, ay2):
+        area = (ax2 - ax1) * (ay2 - ay1)
+        n = rect_sum(occ, ax1, ay1, ax2, ay2)
+        if n == 0:
+            return True, None
+        if n != area:
+            return False, None
+        sum_r = rect_sum(sr, ax1, ay1, ax2, ay2)
+        sum_g = rect_sum(sg, ax1, ay1, ax2, ay2)
+        sum_b = rect_sum(sb, ax1, ay1, ax2, ay2)
+        sum_r2 = rect_sum(sr2, ax1, ay1, ax2, ay2)
+        sum_g2 = rect_sum(sg2, ax1, ay1, ax2, ay2)
+        sum_b2 = rect_sum(sb2, ax1, ay1, ax2, ay2)
+        sum_sq = sum_r2 + sum_g2 + sum_b2
+        best_color = None
+        best_avg = None
+        for name in enabled:
+            cr, cg, cb = MC_COLORS[name]
+            c_sq = cr * cr + cg * cg + cb * cb
+            dot = cr * sum_r + cg * sum_g + cb * sum_b
+            err_sum = sum_sq - 2 * dot + n * c_sq
+            avg_err = err_sum / n
+            if best_avg is None or avg_err < best_avg:
+                best_avg = avg_err
+                best_color = name
+        return (best_avg is not None and best_avg <= loss_threshold), best_color
+
+    choice = {}
+
+    @lru_cache(maxsize=None)
+    def dp(ax1, ay1, ax2, ay2):
+        area = (ax2 - ax1) * (ay2 - ay1)
+        if area <= 0:
+            return 0
+        n = rect_sum(occ, ax1, ay1, ax2, ay2)
+        if n == 0:
+            choice[(ax1, ay1, ax2, ay2)] = ("empty",)
+            return 0
+
+        best = 10 ** 12
+        can_one, one_color = one_rect_plan(ax1, ay1, ax2, ay2)
+        if can_one and one_color is not None:
+            best = 1
+            choice[(ax1, ay1, ax2, ay2)] = ("one", one_color)
+        for xm in range(ax1 + 1, ax2):
+            v = dp(ax1, ay1, xm, ay2) + dp(xm, ay1, ax2, ay2)
+            if v < best:
+                best = v
+                choice[(ax1, ay1, ax2, ay2)] = ("vsplit", xm)
+        for ym in range(ay1 + 1, ay2):
+            v = dp(ax1, ay1, ax2, ym) + dp(ax1, ym, ax2, ay2)
+            if v < best:
+                best = v
+                choice[(ax1, ay1, ax2, ay2)] = ("hsplit", ym)
+        return best
+
+    best_count = dp(x1, y1, x2, y2)
+    rects = []
+
+    def rebuild(ax1, ay1, ax2, ay2):
+        ch = choice.get((ax1, ay1, ax2, ay2))
+        if not ch or ch[0] == "empty":
+            return
+        if ch[0] == "one":
+            rects.append((ax1, ay1, ax2 - ax1, ay2 - ay1, ch[1]))
+            return
+        if ch[0] == "vsplit":
+            xm = ch[1]
+            rebuild(ax1, ay1, xm, ay2)
+            rebuild(xm, ay1, ax2, ay2)
+            return
+        ym = ch[1]
+        rebuild(ax1, ay1, ax2, ym)
+        rebuild(ax1, ym, ax2, ay2)
+
+    rebuild(x1, y1, x2, y2)
+    return best_count, rects
+
+def _evaluate_root_split(candidate):
+    split_type, val, w, h = candidate
+    if split_type == "v":
+        c1, r1 = _solve_rect_exact(_WORKER_RGB_GRID, _WORKER_ENABLED, _WORKER_LOSS, (0, 0, val, h))
+        c2, r2 = _solve_rect_exact(_WORKER_RGB_GRID, _WORKER_ENABLED, _WORKER_LOSS, (val, 0, w, h))
+    else:
+        c1, r1 = _solve_rect_exact(_WORKER_RGB_GRID, _WORKER_ENABLED, _WORKER_LOSS, (0, 0, w, val))
+        c2, r2 = _solve_rect_exact(_WORKER_RGB_GRID, _WORKER_ENABLED, _WORKER_LOSS, (0, val, w, h))
+    return c1 + c2, r1 + r2
+
+def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss, parallel_workers=0):
     h = len(color_grid)
     w = len(color_grid[0]) if h else 0
     if w == 0 or h == 0:
@@ -93,32 +226,7 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
         print("[optimizer] no enabled colors, stop.")
         return []
 
-    # 前缀和：用于 O(1) 计算任意子矩形的颜色统计与像素占用
-    def build_prefix():
-        occ = [[0] * (w + 1) for _ in range(h + 1)]
-        sr = [[0] * (w + 1) for _ in range(h + 1)]
-        sg = [[0] * (w + 1) for _ in range(h + 1)]
-        sb = [[0] * (w + 1) for _ in range(h + 1)]
-        sr2 = [[0] * (w + 1) for _ in range(h + 1)]
-        sg2 = [[0] * (w + 1) for _ in range(h + 1)]
-        sb2 = [[0] * (w + 1) for _ in range(h + 1)]
-        for y in range(h):
-            for x in range(w):
-                pix = rgb_grid[y][x]
-                o = 0 if pix is None else 1
-                r = 0 if pix is None else pix[0]
-                g = 0 if pix is None else pix[1]
-                b = 0 if pix is None else pix[2]
-                occ[y+1][x+1] = occ[y][x+1] + occ[y+1][x] - occ[y][x] + o
-                sr[y+1][x+1] = sr[y][x+1] + sr[y+1][x] - sr[y][x] + r
-                sg[y+1][x+1] = sg[y][x+1] + sg[y+1][x] - sg[y][x] + g
-                sb[y+1][x+1] = sb[y][x+1] + sb[y+1][x] - sb[y][x] + b
-                sr2[y+1][x+1] = sr2[y][x+1] + sr2[y+1][x] - sr2[y][x] + r * r
-                sg2[y+1][x+1] = sg2[y][x+1] + sg2[y+1][x] - sg2[y][x] + g * g
-                sb2[y+1][x+1] = sb2[y][x+1] + sb2[y+1][x] - sb2[y][x] + b * b
-        return occ, sr, sg, sb, sr2, sg2, sb2
-
-    occ, sr, sg, sb, sr2, sg2, sb2 = build_prefix()
+    occ, sr, sg, sb, sr2, sg2, sb2 = _build_prefix(rgb_grid)
 
     def rect_sum(prefix, x1, y1, x2, y2):
         return prefix[y2][x2] - prefix[y1][x2] - prefix[y2][x1] + prefix[y1][x1]
@@ -201,8 +309,7 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
 
         return best
 
-    dp(0, 0, w, h)
-
+    root_cost = dp(0, 0, w, h)
     rects = []
 
     def rebuild(x1, y1, x2, y2):
@@ -228,6 +335,30 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
             return
 
     rebuild(0, 0, w, h)
+
+    workers = parallel_workers if parallel_workers and parallel_workers > 1 else 0
+    if workers > 1 and w > 1 and h > 1:
+        print(f"[optimizer] multiprocessing root-split enabled: workers={workers}")
+        candidates = [("v", xm, w, h) for xm in range(1, w)] + [("h", ym, w, h) for ym in range(1, h)]
+        best_parallel_cost = root_cost
+        best_parallel_rects = rects
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(rgb_grid, enabled, loss_threshold),
+        ) as ex:
+            futures = [ex.submit(_evaluate_root_split, c) for c in candidates]
+            for f in as_completed(futures):
+                cost, split_rects = f.result()
+                if cost < best_parallel_cost:
+                    best_parallel_cost = cost
+                    best_parallel_rects = split_rects
+        if best_parallel_cost < root_cost:
+            print(f"[optimizer] parallel root split improved: {root_cost} -> {best_parallel_cost}")
+            rects = best_parallel_rects
+
     elapsed = time.time() - start_time
     print(
         f"[optimizer] done: rectangles={len(rects)}, "
@@ -243,7 +374,7 @@ def ensure_dir(path):
 def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
                          pixel_size, invert_y, skip_transparent,
                          glow, enabled_colors, orientation="横向",
-                         acceptable_loss=0.0):
+                         acceptable_loss=0.0, parallel_workers=0):
 
     print(f"[generator] load image: {img_path}")
     img = Image.open(img_path).convert("RGBA")
@@ -256,7 +387,9 @@ def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
 
     brightness_str = "brightness:{block:15,sky:0}" if glow else "brightness:{block:0,sky:0}"
 
-    selected_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
+    selected_rects = optimize_rectangles(
+        color_grid, rgb_grid, enabled_colors, acceptable_loss, parallel_workers=parallel_workers
+    )
     print(f"[generator] selected rectangles: {len(selected_rects)}")
 
     for i, j, rect_w, rect_h, color_name in selected_rects:
@@ -327,6 +460,7 @@ class App(ctk.CTk):
         self.orientation = ctk.StringVar(value="横向")
         # 使用 StringVar 避免 Entry 临时为空字符串时触发 DoubleVar 的 TclError
         self.acceptable_loss = ctk.StringVar(value="0")
+        self.parallel_workers = ctk.StringVar(value="0")
         self.enabled_colors = {name: ctk.BooleanVar(value=True) for name in MC_COLORS}
 
         # ---------- 左右分栏 ----------
@@ -357,6 +491,8 @@ class App(ctk.CTk):
         ctk.CTkOptionMenu(left_frame, variable=self.orientation, values=["横向", "竖向", "竖向（z延申）"], font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=2)
         ctk.CTkLabel(left_frame, text="可接受损失(0~20000):", font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=(6,0))
         ctk.CTkEntry(left_frame, textvariable=self.acceptable_loss, width=280, font=("Microsoft YaHei", 11)).pack(padx=5, pady=2)
+        ctk.CTkLabel(left_frame, text="并行进程数(0=自动):", font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=(6,0))
+        ctk.CTkEntry(left_frame, textvariable=self.parallel_workers, width=280, font=("Microsoft YaHei", 11)).pack(padx=5, pady=2)
         self.generate_button = ctk.CTkButton(left_frame, text="生成指令", command=self.run, font=("Microsoft YaHei", 12, "bold"))
         self.generate_button.pack(pady=10)
 
@@ -415,6 +551,7 @@ class App(ctk.CTk):
         enabled_colors_dict = {name: var.get() for name, var in self.enabled_colors.items()}
         try:
             acceptable_loss = self.parse_acceptable_loss()
+            parallel_workers = self.parse_parallel_workers()
         except Exception as e:
             messagebox.showerror("错误", str(e))
             return
@@ -423,12 +560,12 @@ class App(ctk.CTk):
         print("[gui] dispatch worker thread...")
         worker = threading.Thread(
             target=self.run_generation_worker,
-            args=(img_path, out_path, enabled_colors_dict, acceptable_loss),
+            args=(img_path, out_path, enabled_colors_dict, acceptable_loss, parallel_workers),
             daemon=True,
         )
         worker.start()
 
-    def run_generation_worker(self, img_path, out_path, enabled_colors_dict, acceptable_loss):
+    def run_generation_worker(self, img_path, out_path, enabled_colors_dict, acceptable_loss, parallel_workers):
         try:
             print("[gui] start generating...")
             n, w, h = image_to_commands_2d(
@@ -442,7 +579,8 @@ class App(ctk.CTk):
                 glow=self.glow.get(),
                 enabled_colors=enabled_colors_dict,
                 orientation=self.orientation.get(),
-                acceptable_loss=acceptable_loss
+                acceptable_loss=acceptable_loss,
+                parallel_workers=parallel_workers,
             )
             print(f"[gui] done: commands={n}, image={w}x{h}")
             self.after(0, lambda: self.on_generation_success(n, w, h))
@@ -467,6 +605,18 @@ class App(ctk.CTk):
             return max(0.0, float(value))
         except ValueError:
             raise ValueError("可接受损失必须是数字")
+
+    def parse_parallel_workers(self):
+        value = self.parallel_workers.get().strip()
+        if value == "" or value == "0":
+            return max(1, os.cpu_count() or 1)
+        try:
+            workers = int(value)
+        except ValueError:
+            raise ValueError("并行进程数必须是整数")
+        if workers < 1:
+            raise ValueError("并行进程数必须 >= 1")
+        return workers
 
 if __name__ == "__main__":
     app = App()
