@@ -84,6 +84,8 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
     if w == 0 or h == 0:
         return []
     start_time = time.time()
+    # DP 子矩形状态总数：C(w+1,2) * C(h+1,2)
+    total_states = (w * (w + 1) // 2) * (h * (h + 1) // 2)
     print(f"[optimizer] start: size={w}x{h}, acceptable_loss={acceptable_loss}")
     enabled = [name for name in MC_COLORS if enabled_colors[name]]
     if not enabled:
@@ -161,7 +163,12 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
         progress["calls"] += 1
         if progress["calls"] - progress["last_print"] >= 5000:
             elapsed = time.time() - start_time
-            print(f"[optimizer] running... states={progress['calls']}, elapsed={elapsed:.2f}s")
+            ratio = min(1.0, progress["calls"] / max(1, total_states))
+            eta = (elapsed / ratio - elapsed) if ratio > 0 else 0.0
+            print(
+                f"[optimizer] running... states={progress['calls']}/{total_states} "
+                f"({ratio*100:.1f}%), elapsed={elapsed:.2f}s, eta~{eta:.2f}s"
+            )
             progress["last_print"] = progress["calls"]
         area = (x2 - x1) * (y2 - y1)
         if area <= 0:
@@ -221,7 +228,10 @@ def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
 
     rebuild(0, 0, w, h)
     elapsed = time.time() - start_time
-    print(f"[optimizer] done: rectangles={len(rects)}, states={progress['calls']}, elapsed={elapsed:.2f}s")
+    print(
+        f"[optimizer] done: rectangles={len(rects)}, "
+        f"states={progress['calls']}/{total_states}, elapsed={elapsed:.2f}s"
+    )
     return rects
 
 def ensure_dir(path):
