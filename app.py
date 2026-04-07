@@ -77,6 +77,61 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                 grid[j][i] = nearest_color_name(rgb, enabled_colors)
     return grid, rgb_grid
 
+def greedy_merge_rectangles(color_grid):
+    h = len(color_grid)
+    w = len(color_grid[0]) if h else 0
+    processed = [[False] * w for _ in range(h)]
+    rects = []
+    for j in range(h):
+        i = 0
+        while i < w:
+            if processed[j][i] or color_grid[j][i] is None:
+                i += 1
+                continue
+            color_name = color_grid[j][i]
+            max_w_run = 1
+            while i + max_w_run < w and (not processed[j][i+max_w_run]) and color_grid[j][i+max_w_run] == color_name:
+                max_w_run += 1
+            height = 1
+            cur_width = max_w_run
+            while True:
+                next_row = j + height
+                if next_row >= h:
+                    break
+                run2 = 0
+                while run2 < cur_width and (i + run2) < w and (not processed[next_row][i+run2]) and color_grid[next_row][i+run2] == color_name:
+                    run2 += 1
+                if run2 == 0:
+                    break
+                cur_width = run2
+                height += 1
+            rect_w = cur_width
+            rect_h = height
+            for jj in range(j, j + rect_h):
+                for ii in range(i, i + rect_w):
+                    processed[jj][ii] = True
+            rects.append((i, j, rect_w, rect_h, color_name))
+            i += rect_w
+    return rects
+
+def average_loss_for_rectangles(rectangles, rgb_grid):
+    if not rectangles:
+        return 0.0
+    total_err = 0.0
+    total_pixels = 0
+    for x, y, rw, rh, color_name in rectangles:
+        target = MC_COLORS[color_name]
+        for yy in range(y, y + rh):
+            for xx in range(x, x + rw):
+                pix = rgb_grid[yy][xx]
+                if pix is None:
+                    continue
+                total_err += rgb_dist(pix, target)
+                total_pixels += 1
+    if total_pixels == 0:
+        return 0.0
+    return total_err / total_pixels
+
 def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
     h = len(color_grid)
     w = len(color_grid[0]) if h else 0
@@ -191,9 +246,24 @@ def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
 
     brightness_str = "brightness:{block:15,sky:0}" if glow else "brightness:{block:0,sky:0}"
 
-    optimized_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
+    greedy_rects = greedy_merge_rectangles(color_grid)
+    greedy_loss = average_loss_for_rectangles(greedy_rects, rgb_grid)
 
-    for i, j, rect_w, rect_h, color_name in optimized_rects:
+    optimized_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
+    optimized_loss = average_loss_for_rectangles(optimized_rects, rgb_grid)
+
+    candidates = []
+    loss_threshold = max(0.0, float(acceptable_loss))
+    if greedy_loss <= loss_threshold:
+        candidates.append((len(greedy_rects), greedy_loss, greedy_rects))
+    if optimized_loss <= loss_threshold:
+        candidates.append((len(optimized_rects), optimized_loss, optimized_rects))
+    if not candidates:
+        selected_rects = greedy_rects
+    else:
+        selected_rects = min(candidates, key=lambda x: (x[0], x[1]))[2]
+
+    for i, j, rect_w, rect_h, color_name in selected_rects:
             block = MC_BLOCK_TEMPLATE.format(color_name)
             # 坐标计算
             if orientation == "横向":
