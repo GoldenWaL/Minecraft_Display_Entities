@@ -60,76 +60,170 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                 grid[j][i] = nearest_color_name((r,g,b), enabled_colors)
     return grid
 
-def largest_rectangle_in_mask(mask):
-    """在二值掩码中寻找面积最大的全 True 矩形，返回 (x, y, w, h, area)。"""
+def build_prefix_sum(mask):
     h = len(mask)
     w = len(mask[0]) if h else 0
-    heights = [0] * w
-    best = (0, 0, 0, 0, 0)
-
+    prefix = [[0] * (w + 1) for _ in range(h + 1)]
     for y in range(h):
+        row_acc = 0
         for x in range(w):
-            heights[x] = heights[x] + 1 if mask[y][x] else 0
+            row_acc += 1 if mask[y][x] else 0
+            prefix[y + 1][x + 1] = prefix[y][x + 1] + row_acc
+    return prefix
 
-        stack = []
-        for i in range(w + 1):
-            cur_h = heights[i] if i < w else 0
-            start = i
-            while stack and stack[-1][1] > cur_h:
-                idx, h_val = stack.pop()
-                width = i - idx
-                area = h_val * width
-                if area > best[4]:
-                    best_x = idx
-                    best_y = y - h_val + 1
-                    best = (best_x, best_y, width, h_val, area)
-                start = idx
-            if not stack or stack[-1][1] < cur_h:
-                stack.append((start, cur_h))
-    return best
+def area_sum(prefix, x1, y1, x2, y2):
+    return (prefix[y2 + 1][x2 + 1] - prefix[y1][x2 + 1]
+            - prefix[y2 + 1][x1] + prefix[y1][x1])
+
+def split_components(cells):
+    cell_set = set(cells)
+    components = []
+    while cell_set:
+        start = next(iter(cell_set))
+        stack = [start]
+        cell_set.remove(start)
+        comp = [start]
+        while stack:
+            x, y = stack.pop()
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if (nx, ny) in cell_set:
+                    cell_set.remove((nx, ny))
+                    stack.append((nx, ny))
+                    comp.append((nx, ny))
+        components.append(comp)
+    return components
+
+def exact_min_rect_cover_for_component(component_cells):
+    """
+    对单个同色连通块做精确最优矩形覆盖（最少矩形数量）。
+    返回 [(x, y, w, h), ...]。
+    """
+    if not component_cells:
+        return []
+
+    min_x = min(x for x, _ in component_cells)
+    max_x = max(x for x, _ in component_cells)
+    min_y = min(y for _, y in component_cells)
+    max_y = max(y for _, y in component_cells)
+    bw = max_x - min_x + 1
+    bh = max_y - min_y + 1
+
+    local_mask = [[False] * bw for _ in range(bh)]
+    for x, y in component_cells:
+        local_mask[y - min_y][x - min_x] = True
+
+    prefix = build_prefix_sum(local_mask)
+    indexed_cells = list(component_cells)
+    cell_to_idx = {cell: i for i, cell in enumerate(indexed_cells)}
+    n = len(indexed_cells)
+
+    rects = []  # [(bitmask, (x, y, w, h), area)]
+    for y1 in range(bh):
+        for x1 in range(bw):
+            if not local_mask[y1][x1]:
+                continue
+            for y2 in range(y1, bh):
+                for x2 in range(x1, bw):
+                    area = (x2 - x1 + 1) * (y2 - y1 + 1)
+                    if area_sum(prefix, x1, y1, x2, y2) != area:
+                        continue
+                    bitmask = 0
+                    for yy in range(y1, y2 + 1):
+                        for xx in range(x1, x2 + 1):
+                            gx, gy = xx + min_x, yy + min_y
+                            bitmask |= 1 << cell_to_idx[(gx, gy)]
+                    rects.append((bitmask, (x1 + min_x, y1 + min_y, x2 - x1 + 1, y2 - y1 + 1), area))
+
+    # 按面积从大到小排序，可显著加速分支限界
+    rects.sort(key=lambda item: item[2], reverse=True)
+
+    rects_by_cell = [[] for _ in range(n)]
+    for ridx, (bitmask, _, _) in enumerate(rects):
+        b = bitmask
+        while b:
+            lsb = b & -b
+            cell_idx = (lsb.bit_length() - 1)
+            rects_by_cell[cell_idx].append(ridx)
+            b ^= lsb
+
+    all_uncovered = (1 << n) - 1
+    best_count = n
+    best_solution = None
+    memo = {}
+
+    def dfs(uncovered, chosen):
+        nonlocal best_count, best_solution
+        used = len(chosen)
+        if used >= best_count:
+            return
+        if uncovered == 0:
+            best_count = used
+            best_solution = chosen[:]
+            return
+
+        prev = memo.get(uncovered)
+        if prev is not None and prev <= used:
+            return
+        memo[uncovered] = used
+
+        # 下界剪枝：理论最少还需 ceil(剩余格子 / 最大矩形面积)
+        remaining = uncovered.bit_count()
+        lower_bound = (remaining + rects[0][2] - 1) // rects[0][2]
+        if used + lower_bound >= best_count:
+            return
+
+        # 选择候选矩形数最少的未覆盖像素作为分支点
+        temp = uncovered
+        pivot_idx = None
+        pivot_options = None
+        min_branch = None
+        while temp:
+            lsb = temp & -temp
+            idx = lsb.bit_length() - 1
+            options = []
+            for ridx in rects_by_cell[idx]:
+                rmask = rects[ridx][0]
+                if (rmask & uncovered) == rmask:
+                    options.append(ridx)
+            count = len(options)
+            if count == 0:
+                return
+            if min_branch is None or count < min_branch:
+                min_branch = count
+                pivot_idx = idx
+                pivot_options = options
+                if count == 1:
+                    break
+            temp ^= lsb
+
+        for ridx in pivot_options:
+            rmask = rects[ridx][0]
+            dfs(uncovered ^ rmask, chosen + [ridx])
+
+    dfs(all_uncovered, [])
+
+    if best_solution is None:
+        # 兜底，理论不应触发
+        return [(x, y, 1, 1) for x, y in component_cells]
+
+    return [rects[ridx][1] for ridx in best_solution]
 
 def compress_color_grid(color_grid):
-    """
-    使用“全局最大矩形优先”压缩：
-    每次从全部颜色中选择当前可放置的最大同色矩形，直到全部像素被覆盖。
-    """
+    """按颜色拆分并做精确最优覆盖，得到全局最少实体数量。"""
     h = len(color_grid)
     w = len(color_grid[0]) if h else 0
-    covered = [[False] * w for _ in range(h)]
-    total_to_cover = sum(1 for row in color_grid for cell in row if cell is not None)
-    covered_count = 0
     rectangles = []
 
-    while covered_count < total_to_cover:
-        best_rect = None  # (x, y, rw, rh, area, color)
-        # 为每种颜色构建当前可用掩码，并找最大矩形
-        for color_name in MC_COLORS:
-            mask = [[(color_grid[y][x] == color_name and not covered[y][x]) for x in range(w)] for y in range(h)]
-            x, y, rw, rh, area = largest_rectangle_in_mask(mask)
-            if area == 0:
-                continue
-            if best_rect is None or area > best_rect[4]:
-                best_rect = (x, y, rw, rh, area, color_name)
+    for color_name in MC_COLORS:
+        color_cells = [(x, y) for y in range(h) for x in range(w) if color_grid[y][x] == color_name]
+        if not color_cells:
+            continue
 
-        if best_rect is None:
-            # 理论上不会发生；兜底避免死循环
-            break
-
-        x, y, rw, rh, area, color_name = best_rect
-        rectangles.append((x, y, rw, rh, color_name))
-        for yy in range(y, y + rh):
-            for xx in range(x, x + rw):
-                if color_grid[yy][xx] == color_name and not covered[yy][xx]:
-                    covered[yy][xx] = True
-                    covered_count += 1
-
-    # 如果有残留（异常情况下），用 1x1 补齐
-    for y in range(h):
-        for x in range(w):
-            color_name = color_grid[y][x]
-            if color_name is not None and not covered[y][x]:
-                rectangles.append((x, y, 1, 1, color_name))
-                covered[y][x] = True
+        components = split_components(color_cells)
+        for comp in components:
+            cover_rects = exact_min_rect_cover_for_component(comp)
+            for x, y, rw, rh in cover_rects:
+                rectangles.append((x, y, rw, rh, color_name))
 
     return rectangles
 
