@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 from functools import lru_cache
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -356,7 +357,8 @@ class App(ctk.CTk):
         ctk.CTkOptionMenu(left_frame, variable=self.orientation, values=["横向", "竖向", "竖向（z延申）"], font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=2)
         ctk.CTkLabel(left_frame, text="可接受损失(0~20000):", font=("Microsoft YaHei", 11)).pack(anchor="w", padx=5, pady=(6,0))
         ctk.CTkEntry(left_frame, textvariable=self.acceptable_loss, width=280, font=("Microsoft YaHei", 11)).pack(padx=5, pady=2)
-        ctk.CTkButton(left_frame, text="生成指令", command=self.run, font=("Microsoft YaHei", 12, "bold")).pack(pady=10)
+        self.generate_button = ctk.CTkButton(left_frame, text="生成指令", command=self.run, font=("Microsoft YaHei", 12, "bold"))
+        self.generate_button.pack(pady=10)
 
         # ---------- 颜色选择 ----------
         ctk.CTkLabel(right_frame, text="启用颜色", font=("Microsoft YaHei", 14, "bold")).pack(pady=5)
@@ -412,6 +414,22 @@ class App(ctk.CTk):
             return
         enabled_colors_dict = {name: var.get() for name, var in self.enabled_colors.items()}
         try:
+            acceptable_loss = self.parse_acceptable_loss()
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+            return
+
+        self.generate_button.configure(state="disabled", text="生成中...")
+        print("[gui] dispatch worker thread...")
+        worker = threading.Thread(
+            target=self.run_generation_worker,
+            args=(img_path, out_path, enabled_colors_dict, acceptable_loss),
+            daemon=True,
+        )
+        worker.start()
+
+    def run_generation_worker(self, img_path, out_path, enabled_colors_dict, acceptable_loss):
+        try:
             print("[gui] start generating...")
             n, w, h = image_to_commands_2d(
                 img_path, out_path,
@@ -424,14 +442,22 @@ class App(ctk.CTk):
                 glow=self.glow.get(),
                 enabled_colors=enabled_colors_dict,
                 orientation=self.orientation.get(),
-                acceptable_loss=self.parse_acceptable_loss()
+                acceptable_loss=acceptable_loss
             )
             print(f"[gui] done: commands={n}, image={w}x{h}")
-            messagebox.showinfo("完成", f"生成 {n} 条指令，图片尺寸 {w}×{h}")
+            self.after(0, lambda: self.on_generation_success(n, w, h))
         except Exception as e:
             print(f"[gui] failed: {e}")
-            messagebox.showerror("错误", str(e))
-            print(e)
+            self.after(0, lambda: self.on_generation_fail(e))
+
+    def on_generation_success(self, n, w, h):
+        self.generate_button.configure(state="normal", text="生成指令")
+        messagebox.showinfo("完成", f"生成 {n} 条指令，图片尺寸 {w}×{h}")
+
+    def on_generation_fail(self, err):
+        self.generate_button.configure(state="normal", text="生成指令")
+        messagebox.showerror("错误", str(err))
+        print(err)
 
     def parse_acceptable_loss(self):
         value = self.acceptable_loss.get().strip()
