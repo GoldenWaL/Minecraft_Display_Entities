@@ -60,6 +60,79 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                 grid[j][i] = nearest_color_name((r,g,b), enabled_colors)
     return grid
 
+def largest_rectangle_in_mask(mask):
+    """在二值掩码中寻找面积最大的全 True 矩形，返回 (x, y, w, h, area)。"""
+    h = len(mask)
+    w = len(mask[0]) if h else 0
+    heights = [0] * w
+    best = (0, 0, 0, 0, 0)
+
+    for y in range(h):
+        for x in range(w):
+            heights[x] = heights[x] + 1 if mask[y][x] else 0
+
+        stack = []
+        for i in range(w + 1):
+            cur_h = heights[i] if i < w else 0
+            start = i
+            while stack and stack[-1][1] > cur_h:
+                idx, h_val = stack.pop()
+                width = i - idx
+                area = h_val * width
+                if area > best[4]:
+                    best_x = idx
+                    best_y = y - h_val + 1
+                    best = (best_x, best_y, width, h_val, area)
+                start = idx
+            if not stack or stack[-1][1] < cur_h:
+                stack.append((start, cur_h))
+    return best
+
+def compress_color_grid(color_grid):
+    """
+    使用“全局最大矩形优先”压缩：
+    每次从全部颜色中选择当前可放置的最大同色矩形，直到全部像素被覆盖。
+    """
+    h = len(color_grid)
+    w = len(color_grid[0]) if h else 0
+    covered = [[False] * w for _ in range(h)]
+    total_to_cover = sum(1 for row in color_grid for cell in row if cell is not None)
+    covered_count = 0
+    rectangles = []
+
+    while covered_count < total_to_cover:
+        best_rect = None  # (x, y, rw, rh, area, color)
+        # 为每种颜色构建当前可用掩码，并找最大矩形
+        for color_name in MC_COLORS:
+            mask = [[(color_grid[y][x] == color_name and not covered[y][x]) for x in range(w)] for y in range(h)]
+            x, y, rw, rh, area = largest_rectangle_in_mask(mask)
+            if area == 0:
+                continue
+            if best_rect is None or area > best_rect[4]:
+                best_rect = (x, y, rw, rh, area, color_name)
+
+        if best_rect is None:
+            # 理论上不会发生；兜底避免死循环
+            break
+
+        x, y, rw, rh, area, color_name = best_rect
+        rectangles.append((x, y, rw, rh, color_name))
+        for yy in range(y, y + rh):
+            for xx in range(x, x + rw):
+                if color_grid[yy][xx] == color_name and not covered[yy][xx]:
+                    covered[yy][xx] = True
+                    covered_count += 1
+
+    # 如果有残留（异常情况下），用 1x1 补齐
+    for y in range(h):
+        for x in range(w):
+            color_name = color_grid[y][x]
+            if color_name is not None and not covered[y][x]:
+                rectangles.append((x, y, 1, 1, color_name))
+                covered[y][x] = True
+
+    return rectangles
+
 def ensure_dir(path):
     d = os.path.dirname(path)
     if d and not os.path.exists(d):
@@ -70,85 +143,55 @@ def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
                          glow, enabled_colors, orientation="横向"):
 
     img = Image.open(img_path).convert("RGBA")
-    if orientation == "竖向" or "竖向（z延申）":
+    if orientation in ("竖向", "竖向（z延申）"):
         img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
 
     w, h = img.size
     color_grid = build_color_grid(img, skip_transparent, enabled_colors)
-    processed = [[False]*w for _ in range(h)]
+    rectangles = compress_color_grid(color_grid)
     commands = []
 
     brightness_str = "brightness:{block:15,sky:0}" if glow else "brightness:{block:0,sky:0}"
 
-    for j in range(h):
-        i = 0
-        while i < w:
-            if processed[j][i] or color_grid[j][i] is None:
-                i += 1
-                continue
-            color_name = color_grid[j][i]
-            block = MC_BLOCK_TEMPLATE.format(color_name)
-            # 横向扩展
-            max_w_run = 1
-            while i + max_w_run < w and (not processed[j][i+max_w_run]) and color_grid[j][i+max_w_run] == color_name:
-                max_w_run += 1
-            # 向下扩展
-            height = 1
-            cur_width = max_w_run
-            while True:
-                next_row = j + height
-                if next_row >= h:
-                    break
-                run2 = 0
-                while run2 < cur_width and (i + run2) < w and (not processed[next_row][i+run2]) and color_grid[next_row][i+run2] == color_name:
-                    run2 += 1
-                if run2 == 0:
-                    break
-                cur_width = run2
-                height += 1
-            rect_w = cur_width
-            rect_h = height
-            for jj in range(j, j+rect_h):
-                for ii in range(i, i+rect_w):
-                    processed[jj][ii] = True
-            # 坐标计算
-            if orientation == "横向":
-                world_x = base_x + i * pixel_size
-                world_y = base_y
-                world_z = (base_z + j * pixel_size) #if not invert_y else (base_z - j * pixel_size)
-                scale_x = rect_w * pixel_size
-                scale_y = pixel_size
-                scale_z = rect_h * pixel_size
-            elif orientation == "竖向":
-                world_x = base_x + i * pixel_size
-                world_y = (base_y + j * pixel_size) #if not invert_y else (base_y - j * pixel_size)
-                world_z = base_z
-                scale_x = rect_w * pixel_size
-                scale_y = rect_h * pixel_size
-                scale_z = pixel_size
-            elif orientation == "竖向（z延申）":
-                world_x = base_x
-                world_y = (base_y + j * pixel_size)  # if not invert_y else (base_y - j * pixel_size)
-                world_z = base_z + i * pixel_size
-                scale_x = pixel_size
-                scale_y = rect_h * pixel_size
-                scale_z = rect_w * pixel_size
-            else:  # 竖向
-                world_x = base_x + i * pixel_size
-                world_y = (base_y + j * pixel_size)  # if not invert_y else (base_y - j * pixel_size)
-                world_z = base_z
-                scale_x = rect_w * pixel_size
-                scale_y = rect_h * pixel_size
-                scale_z = pixel_size
-            pos_part = f'summon minecraft:block_display {world_x:.6f} {world_y:.6f} {world_z:.6f} '
-            nbt_part = ('{block_state:{Name:"' + block + '"},' +
-                        brightness_str + ',' +
-                        'transformation:{left_rotation:{angle:0f,axis:[1f,0f,0f]},'
-                        'right_rotation:{angle:0f,axis:[1f,0f,0f]},'
-                        f'scale:[{scale_x:.6f}f,{scale_y:.6f}f,{scale_z:.6f}f],translation:[0f,0f,0f]}}}}')
-            cmd = pos_part + nbt_part
-            commands.append(cmd)
-            i += rect_w
+    for i, j, rect_w, rect_h, color_name in rectangles:
+        block = MC_BLOCK_TEMPLATE.format(color_name)
+        # 坐标计算
+        if orientation == "横向":
+            world_x = base_x + i * pixel_size
+            world_y = base_y
+            world_z = (base_z + j * pixel_size) #if not invert_y else (base_z - j * pixel_size)
+            scale_x = rect_w * pixel_size
+            scale_y = pixel_size
+            scale_z = rect_h * pixel_size
+        elif orientation == "竖向":
+            world_x = base_x + i * pixel_size
+            world_y = (base_y + j * pixel_size) #if not invert_y else (base_y - j * pixel_size)
+            world_z = base_z
+            scale_x = rect_w * pixel_size
+            scale_y = rect_h * pixel_size
+            scale_z = pixel_size
+        elif orientation == "竖向（z延申）":
+            world_x = base_x
+            world_y = (base_y + j * pixel_size)  # if not invert_y else (base_y - j * pixel_size)
+            world_z = base_z + i * pixel_size
+            scale_x = pixel_size
+            scale_y = rect_h * pixel_size
+            scale_z = rect_w * pixel_size
+        else:  # 竖向
+            world_x = base_x + i * pixel_size
+            world_y = (base_y + j * pixel_size)  # if not invert_y else (base_y - j * pixel_size)
+            world_z = base_z
+            scale_x = rect_w * pixel_size
+            scale_y = rect_h * pixel_size
+            scale_z = pixel_size
+        pos_part = f'summon minecraft:block_display {world_x:.6f} {world_y:.6f} {world_z:.6f} '
+        nbt_part = ('{block_state:{Name:"' + block + '"},' +
+                    brightness_str + ',' +
+                    'transformation:{left_rotation:{angle:0f,axis:[1f,0f,0f]},'
+                    'right_rotation:{angle:0f,axis:[1f,0f,0f]},'
+                    f'scale:[{scale_x:.6f}f,{scale_y:.6f}f,{scale_z:.6f}f],translation:[0f,0f,0f]}}}}')
+        cmd = pos_part + nbt_part
+        commands.append(cmd)
     ensure_dir(out_path)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("# Generated by Minecraft Display Entities Generator\n")
