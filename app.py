@@ -267,7 +267,8 @@ class App(ctk.CTk):
         self.invert_y = ctk.BooleanVar(value=False)
         self.glow = ctk.BooleanVar(value=False)
         self.orientation = ctk.StringVar(value="横向")
-        self.acceptable_loss = ctk.DoubleVar(value=0.0)
+        # 使用 StringVar 避免 Entry 临时为空字符串时触发 DoubleVar 的 TclError
+        self.acceptable_loss = ctk.StringVar(value="0")
         self.enabled_colors = {name: ctk.BooleanVar(value=True) for name in MC_COLORS}
 
         # ---------- 左右分栏 ----------
@@ -365,12 +366,21 @@ class App(ctk.CTk):
                 glow=self.glow.get(),
                 enabled_colors=enabled_colors_dict,
                 orientation=self.orientation.get(),
-                acceptable_loss=max(0.0, self.acceptable_loss.get())
+                acceptable_loss=self.parse_acceptable_loss()
             )
             messagebox.showinfo("完成", f"生成 {n} 条指令，图片尺寸 {w}×{h}")
         except Exception as e:
             messagebox.showerror("错误", str(e))
             print(e)
+
+    def parse_acceptable_loss(self):
+        value = self.acceptable_loss.get().strip()
+        if value == "":
+            return 0.0
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            raise ValueError("可接受损失必须是数字")
 
 if __name__ == "__main__":
     app = App()
