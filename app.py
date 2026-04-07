@@ -1,5 +1,5 @@
 import os
-import heapq
+from functools import lru_cache
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -77,154 +77,140 @@ def build_color_grid(img, skip_transparent, enabled_colors):
                 grid[j][i] = nearest_color_name(rgb, enabled_colors)
     return grid, rgb_grid
 
-def greedy_merge_rectangles(color_grid):
-    h = len(color_grid)
-    w = len(color_grid[0]) if h else 0
-    processed = [[False] * w for _ in range(h)]
-    rects = []
-    for j in range(h):
-        i = 0
-        while i < w:
-            if processed[j][i] or color_grid[j][i] is None:
-                i += 1
-                continue
-            color_name = color_grid[j][i]
-            max_w_run = 1
-            while i + max_w_run < w and (not processed[j][i+max_w_run]) and color_grid[j][i+max_w_run] == color_name:
-                max_w_run += 1
-            height = 1
-            cur_width = max_w_run
-            while True:
-                next_row = j + height
-                if next_row >= h:
-                    break
-                run2 = 0
-                while run2 < cur_width and (i + run2) < w and (not processed[next_row][i+run2]) and color_grid[next_row][i+run2] == color_name:
-                    run2 += 1
-                if run2 == 0:
-                    break
-                cur_width = run2
-                height += 1
-            rect_w = cur_width
-            rect_h = height
-            for jj in range(j, j + rect_h):
-                for ii in range(i, i + rect_w):
-                    processed[jj][ii] = True
-            rects.append((i, j, rect_w, rect_h, color_name))
-            i += rect_w
-    return rects
-
-def average_loss_for_rectangles(rectangles, rgb_grid):
-    if not rectangles:
-        return 0.0
-    total_err = 0.0
-    total_pixels = 0
-    for x, y, rw, rh, color_name in rectangles:
-        target = MC_COLORS[color_name]
-        for yy in range(y, y + rh):
-            for xx in range(x, x + rw):
-                pix = rgb_grid[yy][xx]
-                if pix is None:
-                    continue
-                total_err += rgb_dist(pix, target)
-                total_pixels += 1
-    if total_pixels == 0:
-        return 0.0
-    return total_err / total_pixels
-
 def optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss):
     h = len(color_grid)
     w = len(color_grid[0]) if h else 0
     if w == 0 or h == 0:
         return []
-
-    rectangles = []
-
-    def collect_pixels(x1, y1, x2, y2):
-        pts = []
-        for yy in range(y1, y2):
-            for xx in range(x1, x2):
-                if color_grid[yy][xx] is not None:
-                    pts.append((xx, yy))
-        return pts
-
-    def rect_best_color_and_error(x1, y1, x2, y2):
-        pts = collect_pixels(x1, y1, x2, y2)
-        area = max(0, (x2 - x1) * (y2 - y1))
-        if not pts:
-            return None, 0.0, 0, area
-        total = [0, 0, 0]
-        for xx, yy in pts:
-            r, g, b = rgb_grid[yy][xx]
-            total[0] += r
-            total[1] += g
-            total[2] += b
-        n = len(pts)
-        mean_rgb = (total[0] / n, total[1] / n, total[2] / n)
-        best_color, _ = nearest_color_name_with_error(mean_rgb, enabled_colors)
-        error_sum = 0.0
-        target = MC_COLORS[best_color]
-        for xx, yy in pts:
-            error_sum += rgb_dist(rgb_grid[yy][xx], target)
-        avg_error = error_sum / n
-        return best_color, avg_error, n, area
-
-    def split_rect(rect):
-        x1, y1, x2, y2 = rect
-        ww = x2 - x1
-        hh = y2 - y1
-        if ww <= 1 and hh <= 1:
-            return None
-        if ww >= hh and ww > 1:
-            mid = x1 + ww // 2
-            return (x1, y1, mid, y2), (mid, y1, x2, y2)
-        if hh > 1:
-            mid = y1 + hh // 2
-            return (x1, y1, x2, mid), (x1, mid, x2, y2)
-        return None
-
-    pq = []
-    loss_threshold = max(0.0, float(acceptable_loss))
-    root = (0, 0, w, h)
-    c, err, n, area = rect_best_color_and_error(*root)
-    if c is None:
+    enabled = [name for name in MC_COLORS if enabled_colors[name]]
+    if not enabled:
         return []
-    heapq.heappush(pq, (-err, root, c, err, n, area))
 
-    while pq:
-        neg_err, rect, color, err, n, area = heapq.heappop(pq)
-        is_solid_rect = (n == area)
-        if is_solid_rect and err <= loss_threshold:
-            rectangles.append((rect, color))
-            continue
+    # 前缀和：用于 O(1) 计算任意子矩形的颜色统计与像素占用
+    def build_prefix():
+        occ = [[0] * (w + 1) for _ in range(h + 1)]
+        sr = [[0] * (w + 1) for _ in range(h + 1)]
+        sg = [[0] * (w + 1) for _ in range(h + 1)]
+        sb = [[0] * (w + 1) for _ in range(h + 1)]
+        sr2 = [[0] * (w + 1) for _ in range(h + 1)]
+        sg2 = [[0] * (w + 1) for _ in range(h + 1)]
+        sb2 = [[0] * (w + 1) for _ in range(h + 1)]
+        for y in range(h):
+            for x in range(w):
+                pix = rgb_grid[y][x]
+                o = 0 if pix is None else 1
+                r = 0 if pix is None else pix[0]
+                g = 0 if pix is None else pix[1]
+                b = 0 if pix is None else pix[2]
+                occ[y+1][x+1] = occ[y][x+1] + occ[y+1][x] - occ[y][x] + o
+                sr[y+1][x+1] = sr[y][x+1] + sr[y+1][x] - sr[y][x] + r
+                sg[y+1][x+1] = sg[y][x+1] + sg[y+1][x] - sg[y][x] + g
+                sb[y+1][x+1] = sb[y][x+1] + sb[y+1][x] - sb[y][x] + b
+                sr2[y+1][x+1] = sr2[y][x+1] + sr2[y+1][x] - sr2[y][x] + r * r
+                sg2[y+1][x+1] = sg2[y][x+1] + sg2[y+1][x] - sg2[y][x] + g * g
+                sb2[y+1][x+1] = sb2[y][x+1] + sb2[y+1][x] - sb2[y][x] + b * b
+        return occ, sr, sg, sb, sr2, sg2, sb2
 
-        split = split_rect(rect)
-        if split is None:
-            rectangles.append((rect, color))
-            continue
+    occ, sr, sg, sb, sr2, sg2, sb2 = build_prefix()
 
-        r1, r2 = split
-        c1, e1, n1, a1 = rect_best_color_and_error(*r1)
-        c2, e2, n2, a2 = rect_best_color_and_error(*r2)
-        if c1 is None and c2 is None:
-            continue
-        if c1 is None:
-            heapq.heappush(pq, (-e2, r2, c2, e2, n2, a2))
-            continue
-        if c2 is None:
-            heapq.heappush(pq, (-e1, r1, c1, e1, n1, a1))
-            continue
+    def rect_sum(prefix, x1, y1, x2, y2):
+        return prefix[y2][x2] - prefix[y1][x2] - prefix[y2][x1] + prefix[y1][x1]
 
-        # 只要超过误差阈值，或矩形中包含透明空洞，就继续分割
-        heapq.heappush(pq, (-e1, r1, c1, e1, n1, a1))
-        heapq.heappush(pq, (-e2, r2, c2, e2, n2, a2))
+    def one_rect_plan(x1, y1, x2, y2, loss_threshold):
+        area = (x2 - x1) * (y2 - y1)
+        n = rect_sum(occ, x1, y1, x2, y2)
+        if n == 0:
+            return True, None, 0.0  # 全透明，不需要实体
+        if n != area:
+            return False, None, None  # 含透明洞，不允许单实体覆盖
 
-    merged = []
-    for rect, color in rectangles:
-        x1, y1, x2, y2 = rect
-        if x2 > x1 and y2 > y1:
-            merged.append((x1, y1, x2 - x1, y2 - y1, color))
-    return merged
+        sum_r = rect_sum(sr, x1, y1, x2, y2)
+        sum_g = rect_sum(sg, x1, y1, x2, y2)
+        sum_b = rect_sum(sb, x1, y1, x2, y2)
+        sum_r2 = rect_sum(sr2, x1, y1, x2, y2)
+        sum_g2 = rect_sum(sg2, x1, y1, x2, y2)
+        sum_b2 = rect_sum(sb2, x1, y1, x2, y2)
+        sum_sq = sum_r2 + sum_g2 + sum_b2
+
+        best_color = None
+        best_avg = None
+        for name in enabled:
+            cr, cg, cb = MC_COLORS[name]
+            c_sq = cr * cr + cg * cg + cb * cb
+            dot = cr * sum_r + cg * sum_g + cb * sum_b
+            err_sum = sum_sq - 2 * dot + n * c_sq
+            avg_err = err_sum / n
+            if best_avg is None or avg_err < best_avg:
+                best_avg = avg_err
+                best_color = name
+        if best_avg is not None and best_avg <= loss_threshold:
+            return True, best_color, best_avg
+        return False, None, best_avg
+
+    loss_threshold = max(0.0, float(acceptable_loss))
+    INF = 10 ** 12
+    choice = {}
+
+    @lru_cache(maxsize=None)
+    def dp(x1, y1, x2, y2):
+        area = (x2 - x1) * (y2 - y1)
+        if area <= 0:
+            return 0
+        n = rect_sum(occ, x1, y1, x2, y2)
+        if n == 0:
+            choice[(x1, y1, x2, y2)] = ("empty",)
+            return 0
+
+        best = INF
+        can_one, one_color, _ = one_rect_plan(x1, y1, x2, y2, loss_threshold)
+        if can_one and one_color is not None:
+            best = 1
+            choice[(x1, y1, x2, y2)] = ("one", one_color)
+
+        # 竖切
+        for xm in range(x1 + 1, x2):
+            v = dp(x1, y1, xm, y2) + dp(xm, y1, x2, y2)
+            if v < best:
+                best = v
+                choice[(x1, y1, x2, y2)] = ("vsplit", xm)
+
+        # 横切
+        for ym in range(y1 + 1, y2):
+            v = dp(x1, y1, x2, ym) + dp(x1, ym, x2, y2)
+            if v < best:
+                best = v
+                choice[(x1, y1, x2, y2)] = ("hsplit", ym)
+
+        return best
+
+    dp(0, 0, w, h)
+
+    rects = []
+
+    def rebuild(x1, y1, x2, y2):
+        key = (x1, y1, x2, y2)
+        ch = choice.get(key)
+        if not ch:
+            return
+        t = ch[0]
+        if t == "empty":
+            return
+        if t == "one":
+            rects.append((x1, y1, x2 - x1, y2 - y1, ch[1]))
+            return
+        if t == "vsplit":
+            xm = ch[1]
+            rebuild(x1, y1, xm, y2)
+            rebuild(xm, y1, x2, y2)
+            return
+        if t == "hsplit":
+            ym = ch[1]
+            rebuild(x1, y1, x2, ym)
+            rebuild(x1, ym, x2, y2)
+            return
+
+    rebuild(0, 0, w, h)
+    return rects
 
 def ensure_dir(path):
     d = os.path.dirname(path)
@@ -246,22 +232,7 @@ def image_to_commands_2d(img_path, out_path, base_x, base_y, base_z,
 
     brightness_str = "brightness:{block:15,sky:0}" if glow else "brightness:{block:0,sky:0}"
 
-    greedy_rects = greedy_merge_rectangles(color_grid)
-    greedy_loss = average_loss_for_rectangles(greedy_rects, rgb_grid)
-
-    optimized_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
-    optimized_loss = average_loss_for_rectangles(optimized_rects, rgb_grid)
-
-    candidates = []
-    loss_threshold = max(0.0, float(acceptable_loss))
-    if greedy_loss <= loss_threshold:
-        candidates.append((len(greedy_rects), greedy_loss, greedy_rects))
-    if optimized_loss <= loss_threshold:
-        candidates.append((len(optimized_rects), optimized_loss, optimized_rects))
-    if not candidates:
-        selected_rects = greedy_rects
-    else:
-        selected_rects = min(candidates, key=lambda x: (x[0], x[1]))[2]
+    selected_rects = optimize_rectangles(color_grid, rgb_grid, enabled_colors, acceptable_loss)
 
     for i, j, rect_w, rect_h, color_name in selected_rects:
             block = MC_BLOCK_TEMPLATE.format(color_name)
